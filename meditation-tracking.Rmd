@@ -1,0 +1,150 @@
+---
+title: "meditation-tracking"
+author: "Matti Heino"
+date: "26 joulukuuta 2017"
+output: html_document
+---
+
+Set up paths and packages.
+
+```{r setup, include=FALSE}
+
+.libPaths("C:/rlibs/3.4.2")
+
+if (!require(pacman)) install.packages("pacman")
+library(pacman)
+
+p_load(tidyverse, devtools, rio, plyr, tidyverse, Matrix, ggplot2, 
+       lattice, latticeExtra, grid, gridExtra, scales, dygraphs,
+       rgl, plot3D, fractal, nonlinearTseries, crqa, signal, sapa, 
+       ifultools, pracma, nlme, lme4, lmerTest, minpack.lm, igraph,
+       qgraph, graphicalVAR, IsingSampler, IsingFit, lubridate) # bootGraph not found
+       
+p_load(randtests, TSA, tseries, forecast, tidyverse, lubridate, zoo) 
+
+p_load_gh("AtherEnergy/ggTimeSeries")
+
+knitr::opts_chunk$set(echo = TRUE, 
+               warning = TRUE,
+               error = TRUE,
+               cache = TRUE, 
+               collapse = TRUE,
+               eval = TRUE)
+knitr::opts_chunk$set(root.dir = ".")  # Always project root as working directory
+knitr::opts_knit$set(root.dir = ".")  # This is needed for some versions of RStudio
+
+```
+
+Set up data.
+
+The data file is the worksheet "Kopio: Sheet1" exported from Google Sheets to Excel and then to csv. If file is directly exported to csv, it uses commas as separators but keeps commas as decimal. Going through Excel makes the separator ";", which is properly read by read_csv2.  
+
+```{r}
+
+data <- read_csv2("data/Headspace v2 1-50, 207-236, 319-357 (2).csv")
+
+# There were 5 congruent trials and 15 incongruent ones each time.
+# The stroop test program divided the total time for congruent trials by 5
+# to get the average but, for incongruent trials, by 10 instead of 15.
+# Code below fixes this.
+
+data <- data %>% dplyr::mutate(cong_pre = kongaika1,
+                               incong_pre = inkongaika1 * 15 / 10,
+                               diff_pre = incong_pre - cong_pre,
+                               cong_post = kongaika2,
+                               incong_post = inkongaika2 * 15 / 10,
+                               diff_post = incong_post - cong_post,
+                               diff_postpre = diff_post - diff_pre)
+                               
+data$time <- dmy_hm(paste0(data$pva_korj, " ", data$klo), tz = "Europe/Helsinki")
+
+
+```
+
+```{r}
+data %>% ggplot(aes(x = no, y = diff_postpre)) +
+  geom_line()
+
+```
+
+# Tests for level and trend stationarity 
+
+## Bartels rank test
+```{r}
+
+randtests::bartels.rank.test(data$diff_postpre, alternative = "two.sided")
+randtests::bartels.rank.test(data$diff_postpre, alternative = "left.sided")
+randtests::bartels.rank.test(data$diff_postpre, alternative = "right.sided")
+
+```
+
+The results indicate that the data may be non-random, with a trend, without systematic oscillation.
+
+## Cox-Stuart sign test 
+
+```{r}
+
+randtests::cox.stuart.test(na.exclude(data$diff_postpre), alternative = "two.sided")
+randtests::cox.stuart.test(na.exclude(data$diff_postpre), alternative = "left.sided")
+randtests::cox.stuart.test(na.exclude(data$diff_postpre), alternative = "right.sided")
+
+```
+
+The Cox-Stuart test indicates no upward nor downward trend, and random values.
+
+## KPSS test 
+
+```{r}
+
+tseries::kpss.test(na.exclude(data$diff_postpre), lshort = TRUE, null = "Level")
+tseries::kpss.test(na.exclude(data$diff_postpre), lshort = TRUE, null = "Trend")
+
+```
+
+## Test for AR, ARCH or an optimal ARIMA process
+
+First inspect the partial autocorrelation function to get an idea of the AR order.
+
+```{r}
+par(mfrow=c(1,2))
+acf(data$diff_postpre, na.action = na.pass)
+pacf(data$diff_postpre, na.action = na.pass)
+```
+
+```{r}
+# KEENAN 1-DEGREE TEST OF NONLINEARITY
+# H0: time series follows some AR process
+# H1: time series cannot be considered some AR process
+
+TSA::Keenan.test(na.exclude(data$diff_postpre))
+
+```
+
+We cannot rule out that this data follows some AR process.
+
+```{r}
+# MCLEOD-LI TEST FOR CONDITIONAL HETEROSCEDASTICITY
+# H0: time series follows some AR process
+# H1: time series cannot be considered some ARCH process
+
+TSA::McLeod.Li.test(y = data$diff_postpre, plot = TRUE, omit.initial = TRUE)
+```
+
+We cannot rule out that this data follows some AR process.
+
+```{r}
+# MCLEOD-LI TEST FOR CONDITIONAL HETEROSCEDASTICITY
+# H0: time series follows some AR process
+# H1: time series cannot be considered some ARiMA process
+
+TSA::McLeod.Li.test(object = forecast::auto.arima(data$diff_postpre), plot = TRUE, omit.initial = TRUE)
+```
+
+```{r}
+beepMean <- mean(time_length(diff(data$time), unit = "hours"), na.rm = TRUE)
+
+ts0 <- data$diff_postpre[3:length(data$diff_postpre)] %>% ts(., frequency = round(beepMean))
+fit <- StructTS(ts0, type="BSM")
+par(mfrow = c(4, 1)) # to give appropriate aspect ratio for next plot.
+plot(cbind(fitted(fit), resids=resid(fit)), main= "Basic Structural Model for 'diff_postpre'")
+```
