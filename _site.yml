@@ -1,0 +1,20 @@
+name: "Analysing n-of-1 meditation data"  
+author: "Matti Heino"  
+output_dir: "docs"  
+output:  
+  html_document:  
+    self_contained: no
+    number_sections: no
+    toc: yes
+    toc_float: true
+    collapsed: false
+    code_folding: hide
+    theme: readable
+  pdf_document: default
+navbar:  
+  title: "Meditation tracking" 
+  left:
+    - text: "About"
+      href: index.html
+    - text: "Analysis"
+      href: meditation-tracking.html
