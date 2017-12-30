@@ -9,18 +9,19 @@ Set up paths and packages.
 
 ```{r setup, include=FALSE}
 
-.libPaths("C:/rlibs/3.4.2")
+if (!require(pacman)) install.packages("pacman"); library(pacman)
 
-if (!require(pacman)) install.packages("pacman")
-library(pacman)
+Sys.setenv(R_MAX_NUM_DLLS = 1000)
+Sys.getenv("R_MAX_NUM_DLLS")
+
 
 p_load(tidyverse, devtools, rio, plyr, tidyverse, Matrix, ggplot2, 
        lattice, latticeExtra, grid, gridExtra, scales, dygraphs,
        rgl, plot3D, fractal, nonlinearTseries, crqa, signal, sapa, 
        ifultools, pracma, nlme, lme4, lmerTest, minpack.lm, igraph,
-       qgraph, graphicalVAR, IsingSampler, IsingFit, lubridate) # bootGraph not found
-       
-p_load(randtests, TSA, tseries, forecast, tidyverse, lubridate, zoo) 
+       qgraph, graphicalVAR, IsingSampler, IsingFit, lubridate,
+       randtests, TSA, tseries, forecast, tidyverse, lubridate, zoo,
+       userfriendlyscience, dummies) # bootGraph not found
 
 p_load_gh("AtherEnergy/ggTimeSeries")
 
@@ -43,27 +44,69 @@ The data file is the worksheet "Kopio: Sheet1" exported from Google Sheets to Ex
 
 data <- read_csv2("data/Headspace v2 1-50, 207-236, 319-357 (2).csv")
 
+# Fix the comma as decimal point in the variable r1.
+data$r1 <- sub(",", data$r1, replacement = ".") %>% as.numeric(.)
+
 # There were 5 congruent trials and 15 incongruent ones each time.
 # The stroop test program divided the total time for congruent trials by 5
 # to get the average but, for incongruent trials, by 10 instead of 15.
-# Code below fixes this.
+# Rows 2 and 5 in code below fix this.
 
-data <- data %>% dplyr::mutate(cong_pre = kongaika1,
-                               incong_pre = inkongaika1 * 15 / 10,
-                               diff_pre = incong_pre - cong_pre,
-                               cong_post = kongaika2,
-                               incong_post = inkongaika2 * 15 / 10,
-                               diff_post = incong_post - cong_post,
-                               diff_postpre = diff_post - diff_pre)
-                               
-data$time <- dmy_hm(paste0(data$pva_korj, " ", data$klo), tz = "Europe/Helsinki")
+data <- data %>% dplyr::mutate(
+  cong_pre = kongaika1,
+  incong_pre = inkongaika1 * 15 / 10,
+  diff_pre = incong_pre - cong_pre,
+  cong_post = kongaika2,
+  incong_post = inkongaika2 * 15 / 10,
+  diff_post = incong_post - cong_post,
+  diff_postpre = diff_post - diff_pre,
+  selfRegulationFailure = `POV (0=ei, 1=puuhat, 2=palvonta tms., 3=mind, 4=POV)`) %>% 
+  dplyr::filter(as == "1" | as == "2")
 
+# Divide this variable to dummy categories
+dummy.data.frame(data, names = data$selfRegulationFailure)
+selfRegulationFailure <- dummy(data$selfRegulationFailure) %>%
+  data.frame
+
+names(selfRegulationFailure) <- c("selfRegulationFailure0", "selfRegulationFailure1", "selfRegulationFailure2", "selfRegulationFailure3", "selfRegulationFailure4", "selfRegulationFailureNA")
+
+# Stitch the dummies together with main data
+data <- bind_cols(data, selfRegulationFailure) 
+
+# NA is now zero on the dummies. Fix it.
+data <- data %>% rowwise %>% 
+  mutate(selfRegulationFailure0 = ifelse(selfRegulationFailureNA == 1, NA, selfRegulationFailure0),
+  selfRegulationFailure1 = ifelse(selfRegulationFailureNA == 1, NA, selfRegulationFailure1),
+  selfRegulationFailure2 = ifelse(selfRegulationFailureNA == 1, NA, selfRegulationFailure2),
+  selfRegulationFailure3 = ifelse(selfRegulationFailureNA == 1, NA, selfRegulationFailure3),
+  selfRegulationFailure4 = ifelse(selfRegulationFailureNA == 1, NA, selfRegulationFailure4))
+
+# temp: trying different variables
+data$diff_postpre <- data$v1                               
+
+# This creates the date and time; a lot of NAs
+# data$time <- dmy_hm(paste0(data$pva_korj, " ", data$klo), tz = "Europe/Helsinki")
+
+# This creates just the date
+data$time <- dmy(data$pva_eikorj, tz = "Europe/Helsinki")
 
 ```
 
 ```{r}
-data %>% ggplot(aes(x = no, y = diff_postpre)) +
-  geom_line()
+data2 <- data.frame(data$s1, data$r1, data$v1)
+associationMatrix(data2)
+
+associationMatrix(data.frame(data$v1, data$r1, data$s1, data$selfRegulationFailure4))
+cor(data.frame(data$v1, data$r1, data$s1, data$selfRegulationFailure4), use = "pairwise.complete.obs", method = "kendall")
+
+```
+
+```{r}
+data %>% dplyr::filter(no >= 500) %>% 
+  ggplot(aes(x = no, y = diff_postpre), group = 1) +
+  geom_line() +
+  geom_point(aes(x = no, y = as.numeric(selfRegulationFailure)), colour = "darkblue", size = 1)
+
 
 ```
 
@@ -148,3 +191,4 @@ fit <- StructTS(ts0, type="BSM")
 par(mfrow = c(4, 1)) # to give appropriate aspect ratio for next plot.
 plot(cbind(fitted(fit), resids=resid(fit)), main= "Basic Structural Model for 'diff_postpre'")
 ```
+
