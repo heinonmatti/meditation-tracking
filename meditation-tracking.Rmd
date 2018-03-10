@@ -11,17 +11,13 @@ Set up paths and packages.
 
 if (!require(pacman)) install.packages("pacman"); library(pacman)
 
-Sys.setenv(R_MAX_NUM_DLLS = 1000)
-Sys.getenv("R_MAX_NUM_DLLS")
-
-
 p_load(tidyverse, devtools, rio, plyr, tidyverse, Matrix, ggplot2, 
        lattice, latticeExtra, grid, gridExtra, scales, dygraphs,
        rgl, plot3D, fractal, nonlinearTseries, crqa, signal, sapa, 
        ifultools, pracma, nlme, lme4, lmerTest, minpack.lm, igraph,
        qgraph, graphicalVAR, IsingSampler, IsingFit, lubridate,
        randtests, TSA, tseries, forecast, tidyverse, lubridate, zoo,
-       userfriendlyscience, dummies) # bootGraph not found
+       userfriendlyscience, dummies, graphicalVAR) # bootGraph not found
 
 p_load_gh("AtherEnergy/ggTimeSeries")
 
@@ -44,15 +40,22 @@ The data file is the worksheet "Kopio: Sheet1" exported from Google Sheets to Ex
 
 data <- read_csv2("data/Headspace v2 1-50, 207-236, 319-357 (2).csv")
 
-# Fix the comma as decimal point in the variable r1.
+# Fix the comma as decimal point in the variables.
 data$r1 <- sub(",", data$r1, replacement = ".") %>% as.numeric(.)
+data$s1 <- sub(",", data$s1, replacement = ".") %>% as.numeric(.)
+data$s2 <- sub(",", data$s2, replacement = ".") %>% as.numeric(.)
 
 # There were 5 congruent trials and 15 incongruent ones each time.
 # The stroop test program divided the total time for congruent trials by 5
 # to get the average but, for incongruent trials, by 10 instead of 15.
 # Rows 2 and 5 in code below fix this.
 
-data <- data %>% dplyr::mutate(
+data <- data %>% dplyr::rename(
+  mood_bad = "in a bad mood",
+  mood_low = "a little low or irritable",
+  mood_mildlypleasant = "in a mildly pleasant mood",
+  mood_verygood = "in a very good mood") %>% 
+  dplyr::mutate(
   cong_pre = kongaika1,
   incong_pre = inkongaika1 * 15 / 10,
   diff_pre = incong_pre - cong_pre,
@@ -60,55 +63,491 @@ data <- data %>% dplyr::mutate(
   incong_post = inkongaika2 * 15 / 10,
   diff_post = incong_post - cong_post,
   diff_postpre = diff_post - diff_pre,
-  selfRegulationFailure = `POV (0=ei, 1=puuhat, 2=palvonta tms., 3=mind, 4=POV)`) %>% 
-  dplyr::filter(as == "1" | as == "2")
+  selfRegulationFailure = `POV (0=ei, 1=puuhat, 2=palvonta tms., 3=mind, 4=POV)`,
+  selfRegulationFailure4 = ifelse(selfRegulationFailure == 4, 1, 0),
+  selfRegulationFailure34 = ifelse(selfRegulationFailure == 4, 1, 
+                                  ifelse(selfRegulationFailure == 3, 1, 0)),
+  fasting = `Paastotunnit (aikaa ed. ateriasta > 500kcal)`,
+  meditationmin = `Meditaatiomin tanaan`,
+  t_since_coffee = `Kahvista aikaa`,
+  out_of_home = `Muu kuin kotikone?`,
+  awake = Hereilla, 
+  sleephours = unta,
+  sitting = ifelse(as == 1, 1,
+                   ifelse(as == 2, 1,
+                    ifelse(as == 3, 1, 0))),
+  standing = ifelse(as == 21, 1, 0),
+  walking = ifelse(as == 4, 1, 0),
+  meditationmin = as.numeric(meditationmin)) %>% 
+  rowwise() %>%
+  dplyr::mutate(
+  mood_negative = mood_bad + mood_low,
+  mood_positive = mood_mildlypleasant + mood_verygood,
+  sdiff = s2 - s1,
+  rdiff = r2 - r1,
+  vdiff = v2 - v1)
 
-# Divide this variable to dummy categories
-dummy.data.frame(data, names = data$selfRegulationFailure)
-selfRegulationFailure <- dummy(data$selfRegulationFailure) %>%
-  data.frame
-
-names(selfRegulationFailure) <- c("selfRegulationFailure0", "selfRegulationFailure1", "selfRegulationFailure2", "selfRegulationFailure3", "selfRegulationFailure4", "selfRegulationFailureNA")
+data$t_since_coffee <- sub(",", data$t_since_coffee, replacement = ".") %>% as.numeric(.)
 
 # Stitch the dummies together with main data
 data <- bind_cols(data, selfRegulationFailure) 
-
-# NA is now zero on the dummies. Fix it.
-data <- data %>% rowwise %>% 
-  mutate(selfRegulationFailure0 = ifelse(selfRegulationFailureNA == 1, NA, selfRegulationFailure0),
-  selfRegulationFailure1 = ifelse(selfRegulationFailureNA == 1, NA, selfRegulationFailure1),
-  selfRegulationFailure2 = ifelse(selfRegulationFailureNA == 1, NA, selfRegulationFailure2),
-  selfRegulationFailure3 = ifelse(selfRegulationFailureNA == 1, NA, selfRegulationFailure3),
-  selfRegulationFailure4 = ifelse(selfRegulationFailureNA == 1, NA, selfRegulationFailure4))
-
-# temp: trying different variables
-data$diff_postpre <- data$v1                               
 
 # This creates the date and time; a lot of NAs
 # data$time <- dmy_hm(paste0(data$pva_korj, " ", data$klo), tz = "Europe/Helsinki")
 
 # This creates just the date
 data$time <- dmy(data$pva_eikorj, tz = "Europe/Helsinki")
+names(data)
 
+data %>% select(s1, s2, r1, r2, v1, v2, sdiff, rdiff, vdiff)
+```
+
+# graphicalVAR
+
+```{r}
+data1 <- data %>% dplyr::select(sitting, s1, r1, v1, s2, r2, v2, diff_postpre, no)
+
+vars <- data1 %>% select(-no) %>% names()
+
+complete_days <- data1 %>% complete.cases(.) %>% sum
+cat("Measurement days included in model:", complete_days)
+
+colMeans(is.na(data1))
+
+Results <- graphicalVAR(
+  data = (data1),
+  vars = vars,
+  beepvar = "no",
+  gamma = 0
+)
+
+plot(Results)
+
+library(corrgram)
+
+labs <- colnames(data1)
+
+corrgram::corrgram(data1, 
+         cor.method = "spearman", 
+         # diag.panel=panel.minmax, 
+         # lower.panel=panel.shade, 
+         # lower.panel=panel.ellipse,
+         # lower.panel=panel.cor,
+         upper.panel=panel.conf,
+         lower.panel=panel.pie,
+         outer.labels=list(
+           bottom=list(labels=labs,cex=.75, srt=60),
+           left=list(labels=labs,cex=.75, srt=30))
+         )
+
+
+```
+
+Tiredness before and after meditation seems connected, and negatively connected to clarity vice versa.
+Calmness seems to be connected to tiredness through clarity.
+
+Tiredness before meditation predicts tiredness before meditation the next day.
+Tiredness after meditation predicts tiredness after meditation the next day. 
+Clarity after meditation predicts clarity after meditation the next day.
+
+## Add awake
+
+```{r}
+data1 <- data %>% dplyr::select(sitting, s1, r1, v1, s2, r2, v2, diff_postpre, awake, no)
+
+vars <- data1 %>% select(-no) %>% names()
+
+complete_days <- data1 %>% complete.cases(.) %>% sum
+cat("Measurement days included in model:", complete_days)
+
+colMeans(is.na(data1))
+
+Results <- graphicalVAR(
+  data = (data1),
+  vars = vars,
+  beepvar = "no",
+  gamma = 0
+)
+
+plot(Results)
+
+library(corrgram)
+
+labs <- colnames(data1)
+
+corrgram::corrgram(data1, 
+         cor.method = "spearman", 
+         # diag.panel=panel.minmax, 
+         # lower.panel=panel.shade, 
+         # lower.panel=panel.ellipse,
+         # lower.panel=panel.cor,
+         upper.panel=panel.conf,
+         lower.panel=panel.pie,
+         outer.labels=list(
+           bottom=list(labels=labs,cex=.75, srt=60),
+           left=list(labels=labs,cex=.75, srt=30))
+         )
+
+
+```
+
+When adding the hours awake prior to meditation, all nodes in the directed correlations disappear; i.e. they are conditionally independent when taking hours awake into account?
+
+## Add sleephours
+
+```{r}
+data1 <- data %>% dplyr::select(sitting, s1, r1, v1, s2, r2, v2, diff_postpre, awake, sleephours, no)
+
+complete_days <- data1 %>% complete.cases(.) %>% sum
+cat("Measurement days included in model:", complete_days)
+
+vars <- data1 %>% select(-no) %>% names()
+
+colMeans(is.na(data1))
+
+Results <- graphicalVAR(
+  data = (data1),
+  vars = vars,
+  beepvar = "no",
+  gamma = 0
+)
+
+plot(Results)
+
+library(corrgram)
+
+labs <- colnames(data1)
+
+corrgram::corrgram(data1, 
+         cor.method = "spearman", 
+         # diag.panel=panel.minmax, 
+         # lower.panel=panel.shade, 
+         # lower.panel=panel.ellipse,
+         # lower.panel=panel.cor,
+         upper.panel=panel.conf,
+         lower.panel=panel.pie,
+         outer.labels=list(
+           bottom=list(labels=labs,cex=.75, srt=60),
+           left=list(labels=labs,cex=.75, srt=30))
+         )
+
+```
+
+Adding hours slept doesn't change much. But perhaps there's a latent variable affecting the hours awake before the measurement, as well as tiredness?
+
+
+```{r}
+data1 <- data %>% dplyr::select(sitting, s1, r1, s2, r2, diff_postpre, awake, sleephours, no)
+
+complete_days <- data1 %>% complete.cases(.) %>% sum
+cat("Measurement days included in model:", complete_days)
+
+vars <- data1 %>% select(-no) %>% names()
+
+colMeans(is.na(data1))
+
+Results <- graphicalVAR(
+  data = (data1),
+  vars = vars,
+  beepvar = "no",
+  gamma = 0
+)
+
+plot(Results)
+
+library(corrgram)
+
+labs <- colnames(data1)
+
+corrgram::corrgram(data1, 
+         cor.method = "spearman", 
+         # diag.panel=panel.minmax, 
+         # lower.panel=panel.shade, 
+         # lower.panel=panel.ellipse,
+         # lower.panel=panel.cor,
+         upper.panel=panel.conf,
+         lower.panel=panel.pie,
+         outer.labels=list(
+           bottom=list(labels=labs,cex=.75, srt=60),
+           left=list(labels=labs,cex=.75, srt=30))
+         )
+```
+
+Dropping subjective tiredness from the model, it looks like subjective calm and clarity are connected (no surprise), but also the less sleep during the previous night, the earlier the measurement after getting up?
+
+```{r}
+data1 <- data %>% dplyr::select(sitting, s1, r1, s2, r2, diff_postpre, awake, sleephours, selfRegulationFailure4, no)
+
+complete_days <- data1 %>% complete.cases(.) %>% sum
+cat("Measurement days included in model:", complete_days)
+
+vars <- data1 %>% select(-no) %>% names()
+
+colMeans(is.na(data1))
+
+Results <- graphicalVAR(
+  data = (data1),
+  vars = vars,
+  beepvar = "no",
+  gamma = 0
+)
+
+plot(Results)
+
+library(corrgram)
+
+labs <- colnames(data1)
+
+corrgram::corrgram(data1, 
+         cor.method = "spearman", 
+         # diag.panel=panel.minmax, 
+         # lower.panel=panel.shade, 
+         # lower.panel=panel.ellipse,
+         # lower.panel=panel.cor,
+         upper.panel=panel.conf,
+         lower.panel=panel.pie,
+         outer.labels=list(
+           bottom=list(labels=labs,cex=.75, srt=60),
+           left=list(labels=labs,cex=.75, srt=30))
+         )
+```
+
+Self-regulation failure more likely with lack of sleep.
+
+```{r}
+data1 <- data %>% dplyr::select(sitting, s1, s2, diff_postpre, awake, fasting, no)
+
+complete_days <- data1 %>% complete.cases(.) %>% sum
+cat("Measurement days included in model:", complete_days)
+
+vars <- data1 %>% select(-no) %>% names()
+
+colMeans(is.na(data1))
+
+Results <- graphicalVAR(
+  data = (data1),
+  vars = vars,
+  beepvar = "no",
+  gamma = 0
+)
+
+plot(Results)
+
+library(corrgram)
+
+labs <- colnames(data1)
+
+corrgram::corrgram(data1, 
+         cor.method = "spearman", 
+         # diag.panel=panel.minmax, 
+         # lower.panel=panel.shade, 
+         # lower.panel=panel.ellipse,
+         # lower.panel=panel.cor,
+         upper.panel=panel.conf,
+         lower.panel=panel.pie,
+         outer.labels=list(
+           bottom=list(labels=labs,cex=.75, srt=60),
+           left=list(labels=labs,cex=.75, srt=30))
+         )
+```
+
+Adding fasting to the model, almost no connections stay (only connection between fasting and time awake; negative). Power trouble, presumably? Dropping sleep hours doesn't help. Dropping self-regulation failure too re-instates connections between clarity and calm. Further, dropping calm does nothing. After the drops, there are only 6 nodes, with clarity after meditation leading to clarity after meditation the next day (likewise for fasting), but nothing else can be observed.
+
+```{r}
+data1 <- data %>% dplyr::select(sitting, s1, s2, awake, fasting, incong_pre, no)
+
+complete_days <- data1 %>% complete.cases(.) %>% sum
+cat("Measurement days included in model:", complete_days)
+
+vars <- data1 %>% select(-no) %>% names()
+
+colMeans(is.na(data1))
+
+Results <- graphicalVAR(
+  data = (data1),
+  vars = vars,
+  beepvar = "no",
+  gamma = 0
+)
+
+plot(Results)
+
+library(corrgram)
+
+labs <- colnames(data1)
+
+corrgram::corrgram(data1, 
+         cor.method = "spearman", 
+         # diag.panel=panel.minmax, 
+         # lower.panel=panel.shade, 
+         # lower.panel=panel.ellipse,
+         # lower.panel=panel.cor,
+         upper.panel=panel.conf,
+         lower.panel=panel.pie,
+         outer.labels=list(
+           bottom=list(labels=labs,cex=.75, srt=60),
+           left=list(labels=labs,cex=.75, srt=30))
+         )
+```
+
+Switching Stroop result from the difference between incongruent and congruent values to just the time on incongruent values, doesn't do much, although it seems there's a training effect as it lowers with time.
+
+```{r}
+data1 <- data %>% dplyr::select(sitting, s1, v1, s2, v2, awake, sleephours, selfRegulationFailure34, darra, no)
+data %>% names
+complete_days <- data1 %>% complete.cases(.) %>% sum
+cat("Measurement days included in model:", complete_days)
+
+vars <- data1 %>% select(-no) %>% names()
+
+colMeans(is.na(data1))
+
+Results <- graphicalVAR(
+  data = (data1),
+  vars = vars,
+  beepvar = "no",
+  gamma = 0
+)
+
+plot(Results)
+
+library(corrgram)
+
+labs <- colnames(data1)
+
+corrgram::corrgram(data1, 
+         cor.method = "spearman", 
+         # diag.panel=panel.minmax, 
+         # lower.panel=panel.shade, 
+         # lower.panel=panel.ellipse,
+         # lower.panel=panel.cor,
+         upper.panel=panel.conf,
+         lower.panel=panel.pie,
+         outer.labels=list(
+           bottom=list(labels=labs,cex=.75, srt=60),
+           left=list(labels=labs,cex=.75, srt=30))
+         )
+```
+
+As expected, hangover increased self-regulation failure and decreased sleep, though was only related to tiredness via sleep.
+
+```{r}
+
+data1 <- data %>% dplyr::select(sitting, s1, v1, s2, v2, awake, sleephours, selfRegulationFailure34, darra, fasting, t_since_coffee, mood_negative, no)
+
+complete_days <- data1 %>% complete.cases(.) %>% sum
+cat("Measurement days included in model:", complete_days)
+
+vars <- data1 %>% select(-no) %>% names()
+
+colMeans(is.na(data1))
+
+Results <- graphicalVAR(
+  data = (data1),
+  vars = vars,
+  beepvar = "no",
+  gamma = 0
+)
+
+plot(Results)
+
+library(corrgram)
+
+labs <- colnames(data1)
+
+corrgram::corrgram(data1, 
+         cor.method = "spearman", 
+         # diag.panel=panel.minmax, 
+         # lower.panel=panel.shade, 
+         # lower.panel=panel.ellipse,
+         # lower.panel=panel.cor,
+         upper.panel=panel.conf,
+         lower.panel=panel.pie,
+         outer.labels=list(
+           bottom=list(labels=labs,cex=.75, srt=60),
+           left=list(labels=labs,cex=.75, srt=30))
+         )
 ```
 
 ```{r}
-data2 <- data.frame(data$s1, data$r1, data$v1)
-associationMatrix(data2)
 
-associationMatrix(data.frame(data$v1, data$r1, data$s1, data$selfRegulationFailure4))
-cor(data.frame(data$v1, data$r1, data$s1, data$selfRegulationFailure4), use = "pairwise.complete.obs", method = "kendall")
+data1 <- data %>% dplyr::select(sitting, sdiff, rdiff, vdiff, awake, sleephours, selfRegulationFailure34, darra, fasting, t_since_coffee, mood_negative, no)
 
+complete_days <- data1 %>% complete.cases(.) %>% sum
+cat("Measurement days included in model:", complete_days)
+
+vars <- data1 %>% select(-no) %>% names()
+
+colMeans(is.na(data1))
+
+Results <- graphicalVAR(
+  data = (data1),
+  vars = vars,
+  beepvar = "no",
+  gamma = 0
+)
+
+plot(Results)
+
+library(corrgram)
+
+labs <- colnames(data1)
+
+corrgram::corrgram(data1, 
+         cor.method = "spearman", 
+         # diag.panel=panel.minmax, 
+         # lower.panel=panel.shade, 
+         # lower.panel=panel.ellipse,
+         # lower.panel=panel.cor,
+         upper.panel=panel.conf,
+         lower.panel=panel.pie,
+         outer.labels=list(
+           bottom=list(labels=labs,cex=.75, srt=60),
+           left=list(labels=labs,cex=.75, srt=30))
+         )
 ```
+
+Replacing clarity, calm and tiredness with their differences post-pre meditation didn't change much.
 
 ```{r}
-data %>% dplyr::filter(no >= 500) %>% 
-  ggplot(aes(x = no, y = diff_postpre), group = 1) +
-  geom_line() +
-  geom_point(aes(x = no, y = as.numeric(selfRegulationFailure)), colour = "darkblue", size = 1)
 
+data1 <- data %>% dplyr::select(sdiff, vdiff, awake, sleephours, mood_negative,  no)
 
+complete_days <- data1 %>% complete.cases(.) %>% sum
+cat("Measurement days included in model:", complete_days)
+
+vars <- data1 %>% select(-no) %>% names()
+
+colMeans(is.na(data1))
+
+Results <- graphicalVAR(
+  data = (data1),
+  vars = vars,
+  beepvar = "no",
+  gamma = 0
+)
+
+plot(Results)
+
+library(corrgram)
+
+labs <- colnames(data1)
+
+corrgram::corrgram(data1, 
+         cor.method = "spearman", 
+         # diag.panel=panel.minmax, 
+         # lower.panel=panel.shade, 
+         # lower.panel=panel.ellipse,
+         # lower.panel=panel.cor,
+         upper.panel=panel.conf,
+         lower.panel=panel.pie,
+         outer.labels=list(
+           bottom=list(labels=labs,cex=.75, srt=60),
+           left=list(labels=labs,cex=.75, srt=30))
+         )
 ```
+
+Difference in tiredness post-pre meditation predicted starting of new package; 
 
 # Tests for level and trend stationarity 
 
@@ -190,5 +629,121 @@ ts0 <- data$diff_postpre[3:length(data$diff_postpre)] %>% ts(., frequency = roun
 fit <- StructTS(ts0, type="BSM")
 par(mfrow = c(4, 1)) # to give appropriate aspect ratio for next plot.
 plot(cbind(fitted(fit), resids=resid(fit)), main= "Basic Structural Model for 'diff_postpre'")
+```
+
+# ESM study
+
+The ESM study explored questions about similar topics to the single daily measure study. There were five questions: 
+
+1. How present were you? (Not at all present -- Totally present; 9 options)
+2. What were you doing? (Social media -- Something else on the computer (e.g. work) -- Something else on the mobile -- Talking/interacting with people face-to-face -- Moving (walking, running, etc.) -- Reading -- Household chores -- Meditating). Multiple selection allowed in tick boxes.
+3. Clarity (number between 0-1000)
+4. Calm (number between 0-1000) 
+5. Tiredness (number between 0-1000)
+
+The first measure was 15. Nov 2016, the last one was 27. December 2016. The experiment was set up to beep randomly 8 times a day between ca. 10am and 10pm. It resulted in 343 total beeps, 208 responses to beeps, and 7 self-initiated responses.
+
+## Load ESM-data
+
+```{r}
+esm_data_original <- read_csv("data/esm_paco_meditation-tracking.csv")
+esm_data_original$Vasymys <- esm_data_original$Väsymys 
+
+esm_data <- esm_data_original %>% dplyr::select(when, pacoVersion, experimentId, experimentVersion, actionTriggerId, actionId, actionSpecId, responseTime, scheduledTime, timeZone, presence = Presence, task = Doing, clarity = Selkeys, calm = Rauhallisuus, tiredness = Vasymys, "Form Duration", joined, schedule) %>%
+  mutate(ifelse(responseTime == "<NA>", NA, responseTime),
+         ifelse(scheduledTime == "<NA>", NA, scheduledTime),
+         clarity = clarity / 100,
+         calm = calm / 100,
+         tiredness = tiredness / 100) 
+
+# Clean data
+esm_data <- esm_data %>% 
+  dplyr::mutate(calm = ifelse(calm == 0.05, 5, 
+                               ifelse(calm == 0, NA, calm)),
+                tiredness = ifelse(tiredness == 0.05, 5, 
+                                    ifelse(tiredness == 0, NA, tiredness)),
+                clarity = ifelse(clarity == 0.06, 6, ifelse(clarity == 0, NA, clarity)),
+                clarity = ifelse(clarity == 0.55, 5.5, clarity),
+                day = date(responseTime)) %>% 
+  dplyr::filter(day != "2017-05-18")
+
+esm_data$
+
+write.csv(esm_data, file = "data_meditation-tracking/esm_data.csv")
+
+esm_data <- read_csv("data_meditation-tracking/esm_data.csv")
+
+esm_data$responseTime %>% date()
+```
+
+## Explore and visualise data
+
+```{r}
+skimr::skim(esm_data)
+
+esm_data %>% ggplot2::ggplot(aes(x = clarity)) +
+  geom_histogram(col = "darkorange4", fill = "darkorange4", binwidth = 0.25) +
+  coord_cartesian(xlim = c(0, 10)) +
+  theme(legend.position = "bottom") + 
+  theme_bw()
+
+esm_data %>% ggplot2::ggplot(aes(x = tiredness)) +
+  geom_histogram(col = "darkorange4", fill = "darkorange4", binwidth = 0.25) +
+  coord_cartesian(xlim = c(0, 10)) +
+  theme(legend.position = "bottom") + 
+  theme_bw()
+
+esm_data %>% ggplot2::ggplot(aes(x = calm)) +
+  geom_histogram(col = "darkorange4", fill = "darkorange4", binwidth = 0.25) +
+  coord_cartesian(xlim = c(0, 10)) +
+  theme(legend.position = "bottom") + 
+  theme_bw()
+
+esm_data %>% ggplot2::ggplot(aes(x = presence)) +
+  geom_histogram(col = "darkorange4", fill = "darkorange4", binwidth = 1) +
+  coord_cartesian(xlim = c(1, 9)) +
+  theme(legend.position = "bottom") + 
+  theme_bw()
+
+labs <- esm_data %>% dplyr::select(clarity, tiredness, calm, presence, timeToAnswer = `Form Duration`) %>% names()
+
+corrdata <-  esm_data %>% dplyr::select(clarity, tiredness, calm, presence, timeToAnswer = `Form Duration`)
+
+corrgram::corrgram(corrdata, 
+         cor.method = "pearson", 
+         order = TRUE,
+         # diag.panel=panel.minmax, 
+         # lower.panel=panel.shade, 
+         # lower.panel=panel.ellipse,
+         # lower.panel=panel.cor,
+         upper.panel=panel.conf,
+         lower.panel=panel.pie,
+         outer.labels=list(
+           bottom=list(labels=labs,cex=.75, srt=60),
+           left=list(labels=labs,cex=.75, srt=30))
+          )
+title(main = "Pearson correlations")
+
+```
+
+NEED TIMEVAR AND BEEPVAR
+
+```{r}
+Vars <- c("clarity", "tiredness", "calm", "presence")
+Results <- graphicalVAR(esm_data, vars = Vars, dayvar = "day", gamma = 0)
+
+plot(Results, label.scale = FALSE, labels = Vars)
+```
+
+```{r}
+esm_data %>% ggplot(aes(x = responseTime, y = presence)) +
+  geom_line() +
+  papaja::theme_apa()
+
+range(esm_data$responseTime, na.rm = TRUE)
+```
+
+```{r}
+esm_data
 ```
 
